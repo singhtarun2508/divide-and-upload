@@ -16,6 +16,7 @@ import subprocess
 import math
 from pathlib import Path
 import re
+import datetime
 
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -29,6 +30,7 @@ import tqdm
 # ─────────────────────────────────────────────
 MAIN_VIDEOS_FOLDER_ID = "1c7wmuavpLD8tVNOS8ar_uyL1FkUEVyxz"   # paste folder ID here
 READY_CLIPS_FOLDER_ID = "1SkQgsJRR9G3lRYQlFzyR3wXz8gyjg4l3"   # paste folder ID here
+STATUS_FOLDER_ID = "1bxd0BHRm-AU5JguMmP9sW3u5zZCvoQvQ"  # create a 'status' folder on Drive and paste ID here
 
 CLIP_DURATION = 35          # seconds per clip
 MAX_RETRIES   = 3           # retry attempts for download/upload
@@ -75,24 +77,74 @@ def get_drive_service():
 # ─────────────────────────────────────────────
 # PROGRESS TRACKING
 # ─────────────────────────────────────────────
-def load_progress():
-    if PROGRESS_FILE.exists():
-        with open(PROGRESS_FILE, "r") as f:
-            return json.load(f)
-    return {}
 
-def save_progress(progress):
-    with open(PROGRESS_FILE, "w") as f:
+
+def load_progress(service):
+    """Load latest progress from status folder on Drive."""
+    resp = service.files().list(
+        q=f"'{STATUS_FOLDER_ID}' in parents and mimeType='application/json' and trashed=false",
+        spaces="drive",
+        fields="files(id, name)",
+        orderBy="name desc",
+    ).execute()
+    files = resp.get("files", [])
+    if not files:
+        print("  No status file found. Starting fresh.")
+        return {}
+    latest = files[0]
+    print(f"  Loading status from: {latest['name']}")
+    request = service.files().get_media(fileId=latest["id"])
+    import io
+    fh = io.BytesIO()
+    downloader = MediaIoBaseDownload(fh, request)
+    done = False
+    while not done:
+        _, done = downloader.next_chunk()
+    return json.loads(fh.getvalue().decode())
+
+def save_progress(service, progress):
+    """Save progress to a dated JSON file in status folder on Drive."""
+    today = datetime.date.today().isoformat()
+    file_name = f"{today}.json"
+    content = json.dumps(progress, indent=2).encode()
+
+    # Write to a temp local file first
+    temp_path = BASE_DIR / file_name
+    with open(temp_path, "w") as f:
         json.dump(progress, f, indent=2)
 
-def set_status(progress, file_id, status, extra=None):
+    # Check if today's file already exists on Drive
+    resp = service.files().list(
+        q=f"'{STATUS_FOLDER_ID}' in parents and name='{file_name}' and trashed=false",
+        spaces="drive",
+        fields="files(id)",
+    ).execute()
+    existing = resp.get("files", [])
+
+    media = MediaFileUpload(str(temp_path), mimetype="application/json", resumable=False)
+
+    if existing:
+        service.files().update(
+            fileId=existing[0]["id"],
+            media_body=media,
+        ).execute()
+    else:
+        service.files().create(
+            body={"name": file_name, "parents": [STATUS_FOLDER_ID]},
+            media_body=media,
+            fields="id"
+        ).execute()
+
+    temp_path.unlink()  # remove temp file
+def set_status(service, progress, file_id, status, extra=None):
     if file_id not in progress:
         progress[file_id] = {}
     progress[file_id]["status"] = status
     if extra:
         progress[file_id].update(extra)
-    save_progress(progress)
+    save_progress(service, progress)
     print(f"  [progress] {file_id[:12]}... → {status}")
+
 
 
 # ─────────────────────────────────────────────
@@ -263,14 +315,8 @@ def process_all():
     print("========================================\n")
 
     service  = get_drive_service()
-    # TEMP: check file ownership
-    file_meta = service.files().get(
-    fileId="1IvNY3wo98ms-74KydmShLRiBBzBAKbE4",
-    fields="name, owners, capabilities"
-    ).execute()
-    print("Owners:", file_meta.get("owners"))
-    print("Can delete:", file_meta.get("capabilities", {}).get("canDelete"))
-    progress = load_progress()
+    
+    progress = load_progress(service)
 
     # Step 1: List all videos in main_videos
     print("Scanning 'main_videos' folder on Drive...")
@@ -324,7 +370,7 @@ def process_all():
         # ── STEP: Download ──────────────────────
         if state in ("pending",):
             local_video = download_file(service, file_id, file_name, DOWNLOADS_DIR)
-            set_status(progress, file_id, "downloaded", {"local_path": str(local_video)})
+            set_status(service,progress, file_id, "downloaded", {"local_path": str(local_video)})
             state = "downloaded"
 
         if state == "downloaded":
@@ -332,13 +378,13 @@ def process_all():
             if not local_video.exists():
                 print("  Local file missing, re-downloading...")
                 local_video = download_file(service, file_id, file_name, DOWNLOADS_DIR)
-                set_status(progress, file_id, "downloaded", {"local_path": str(local_video)})
+                set_status(service,progress, file_id, "downloaded", {"local_path": str(local_video)})
 
         # ── STEP: Split ─────────────────────────
         if state == "downloaded":
             clips = split_video(local_video, CLIPS_DIR)
             clip_names = [c.name for c in clips]
-            set_status(progress, file_id, "split", {"clips": clip_names})
+            set_status(service,progress, file_id, "split", {"clips": clip_names})
             state = "split"
 
         # ── STEP: Upload clips ───────────────────
@@ -358,12 +404,12 @@ def process_all():
                 uid = upload_file(service, clip_path, READY_CLIPS_FOLDER_ID)
                 uploaded_ids.append(uid)
                 # save after each upload so crash mid-upload is resumable
-                set_status(progress, file_id, "split", {
+                set_status(service,progress, file_id, "split", {
                     "clips": clip_names,
                     "uploaded_ids": uploaded_ids,
                 })
 
-            set_status(progress, file_id, "uploaded", {
+            set_status(service,progress, file_id, "uploaded", {
                 "clips": clip_names,
                 "uploaded_ids": uploaded_ids,
             })
@@ -375,7 +421,7 @@ def process_all():
             local_video = DOWNLOADS_DIR / file_name
             clips       = [CLIPS_DIR / n for n in progress[file_id].get("clips", [])]
             cleanup_local(local_video, clips)
-            set_status(progress, file_id, "done")
+            set_status(service,progress, file_id, "done")
             print(f"  ✓ '{file_name}' fully processed.\n")
 
     print("\n========================================")
