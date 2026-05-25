@@ -2,7 +2,6 @@ name: Process Drive Videos
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
     - cron: '30 8 * * *'  # 2:00 PM IST = 08:30 UTC
   workflow_dispatch:        # allows manual run from GitHub UI
 
