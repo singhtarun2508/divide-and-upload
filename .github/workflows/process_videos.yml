@@ -2,33 +2,54 @@ name: Process Drive Videos
 
 on:
   schedule:
-    - cron: '30 8 * * *'  # 2:00 PM IST = 08:30 UTC
-  workflow_dispatch:        # allows manual run from GitHub UI
+    - cron: '30 8 * * *'   # 2:00 PM IST
+  workflow_dispatch:
 
 jobs:
   run-script:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repo
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Update apt cache
+        run: sudo apt-get update
+
+      - name: Check FFmpeg
         run: |
-          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib tqdm
+          ffmpeg -version || true
 
-      - name: Install FFmpeg
-        run: sudo apt-get install -y ffmpeg
+      - name: Install FFmpeg if missing
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --fix-missing ffmpeg
+          fi
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            google-api-python-client \
+            google-auth-httplib2 \
+            google-auth-oauthlib \
+            tqdm
 
       - name: Write credentials files
         run: |
-          echo '${{ secrets.GDRIVE_CREDENTIALS }}' > credentials.json
-          echo '${{ secrets.GDRIVE_TOKEN }}' > token.json
+          cat <<'EOF' > credentials.json
+          ${{ secrets.GDRIVE_CREDENTIALS }}
+          EOF
+
+          cat <<'EOF' > token.json
+          ${{ secrets.GDRIVE_TOKEN }}
+          EOF
 
       - name: Run script
         run: python script.py
