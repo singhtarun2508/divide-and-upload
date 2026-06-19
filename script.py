@@ -4,6 +4,7 @@ Google Drive Video Processor
 - Fetches videos from 'main_videos' Google Drive folder
 - Downloads one at a time locally
 - Splits into 35-second clips using FFmpeg
+- Burns "Episode No X Part No Y" text onto each clip
 - Uploads clips to 'ready_clips' Google Drive folder
 - Deletes original after successful upload
 - Fully resumable via progress.json
@@ -35,6 +36,14 @@ STATUS_FOLDER_ID = "1bxd0BHRm-AU5JguMmP9sW3u5zZCvoQvQ"  # create a 'status' fold
 CLIP_DURATION = 35          # seconds per clip
 MAX_RETRIES   = 3           # retry attempts for download/upload
 RETRY_DELAY   = 5           # seconds between retries
+
+# Text overlay settings (Episode No X Part No Y)
+OVERLAY_FONT_FILE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+OVERLAY_FONT_SIZE = 28
+OVERLAY_FONT_COLOR = "white"
+OVERLAY_BORDER_COLOR = "black"
+OVERLAY_BORDER_WIDTH = 3
+OVERLAY_Y_POSITION = "(h*0.86)"   # vertical placement of the text (lower band of frame)
 
 # Paths
 BASE_DIR      = Path(__file__).parent
@@ -252,10 +261,42 @@ def get_video_duration(video_path):
     return float(result.stdout.strip())
 
 
+def extract_episode_number(video_path):
+    """
+    Extract the episode number from the video file name.
+    Takes the first run of digits found in the stem (e.g. 'Episode 12' -> 12,
+    'EP12_final' -> 12, '12' -> 12). Falls back to the full stem if no
+    digits are found.
+    """
+    stem = video_path.stem
+    match = re.search(r"\d+", stem)
+    if match:
+        return str(int(match.group()))  # strip any leading zeros
+    return stem
+
+
+def build_overlay_text(episode_no, part_no):
+    """Build the drawtext-safe overlay string: Episode No X Part No Y"""
+    return f"Episode No {episode_no} Part No {part_no}"
+
+
+def escape_drawtext(text):
+    """Escape characters that are special to ffmpeg's drawtext filter."""
+    return (
+        text.replace("\\", "\\\\")
+            .replace(":", "\\:")
+            .replace("'", "\\'")
+            .replace(",", "\\,")
+    )
+
+
 def split_video(video_path, output_folder, clip_duration=CLIP_DURATION):
     """
     Split video into clips of `clip_duration` seconds each.
-    Uses -c copy (no re-encoding) for speed.
+    Burns "Episode No X Part No Y" text onto each clip in the lower band
+    of the frame. Requires re-encoding (drawtext cannot be used with
+    stream copy), so '-c copy' is replaced with a real video encode here;
+    audio is still passed through unchanged.
     Returns list of clip paths.
     """
     duration   = get_video_duration(video_path)
@@ -263,19 +304,40 @@ def split_video(video_path, output_folder, clip_duration=CLIP_DURATION):
     stem       = video_path.stem
     clips      = []
 
+    episode_no = extract_episode_number(video_path)
+
     print(f"  Splitting '{video_path.name}' → {num_clips} clips of {clip_duration}s each")
 
     for i in range(num_clips):
         start     = i * clip_duration
-        clip_name = f"{stem}_clip{i+1:03d}.mp4"
+        part_no   = i + 1
+        clip_name = f"{stem}_clip{part_no:03d}.mp4"
         clip_path = output_folder / clip_name
+
+        overlay_text = build_overlay_text(episode_no, part_no)
+        escaped_text = escape_drawtext(overlay_text)
+
+        drawtext_filter = (
+            f"drawtext=fontfile={OVERLAY_FONT_FILE}"
+            f":text='{escaped_text}'"
+            f":fontsize={OVERLAY_FONT_SIZE}"
+            f":fontcolor={OVERLAY_FONT_COLOR}"
+            f":borderw={OVERLAY_BORDER_WIDTH}"
+            f":bordercolor={OVERLAY_BORDER_COLOR}"
+            f":x=(w-text_w)/2"
+            f":y={OVERLAY_Y_POSITION}"
+        )
 
         cmd = [
             "ffmpeg", "-y",
             "-ss", str(start),
             "-i", str(video_path),
             "-t", str(clip_duration),
-            "-c", "copy",
+            "-vf", drawtext_filter,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-c:a", "copy",
             str(clip_path),
         ]
 
@@ -286,7 +348,7 @@ def split_video(video_path, output_folder, clip_duration=CLIP_DURATION):
             )
 
         clips.append(clip_path)
-        print(f"    ✓ {clip_name}")
+        print(f"    ✓ {clip_name}  [{overlay_text}]")
 
     return clips
 
@@ -342,7 +404,7 @@ def process_all():
     clip_count = len(clip_resp.get("files", []))
     print(f"  Clips in ready_clips: {clip_count}")
 
-    if clip_count > 4:
+    if clip_count < 4:
         print(f"  ✋ {clip_count} clips already in ready_clips (> 4). Skipping processing.")
         return
 
