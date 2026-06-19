@@ -415,7 +415,7 @@ def process_all():
     clip_count = len(clip_resp.get("files", []))
     print(f"  Clips in ready_clips: {clip_count}")
 
-    if clip_count > 4:
+    if clip_count < 4:
         print(f"  ✋ {clip_count} clips already in ready_clips (> 4). Skipping processing.")
         return
 
