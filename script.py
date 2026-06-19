@@ -264,14 +264,25 @@ def get_video_duration(video_path):
 def extract_episode_number(video_path):
     """
     Extract the episode number from the video file name.
-    Takes the first run of digits found in the stem (e.g. 'Episode 12' -> 12,
-    'EP12_final' -> 12, '12' -> 12). Falls back to the full stem if no
-    digits are found.
+
+    Priority:
+      1. A number inside parentheses, e.g. '1 (10).mkv' -> 10,
+         '1 (5).mkv' -> 5. This is checked first because file names like
+         '1 (10).mkv' have a leading '1' that is NOT the episode number.
+      2. Otherwise, the first run of digits found in the stem
+         (e.g. 'Episode 12' -> 12, 'EP12_final' -> 12, '12' -> 12).
+      3. Falls back to the full stem if no digits are found at all.
     """
     stem = video_path.stem
+
+    bracket_match = re.search(r"\((\d+)\)", stem)
+    if bracket_match:
+        return str(int(bracket_match.group(1)))  # strip any leading zeros
+
     match = re.search(r"\d+", stem)
     if match:
         return str(int(match.group()))  # strip any leading zeros
+
     return stem
 
 
@@ -404,7 +415,7 @@ def process_all():
     clip_count = len(clip_resp.get("files", []))
     print(f"  Clips in ready_clips: {clip_count}")
 
-    if clip_count < 4:
+    if clip_count > 4:
         print(f"  ✋ {clip_count} clips already in ready_clips (> 4). Skipping processing.")
         return
 
